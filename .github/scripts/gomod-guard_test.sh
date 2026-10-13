@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# Self-test for gomod-guard.sh against go.mod fixtures. It touches no network:
+# a fake gh on PATH answers the compare calls the way the GitHub API does.
+#
+# Run from anywhere:
+#   bash .github/scripts/gomod-guard_test.sh
+set -euo pipefail
+
+scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+guard="$scripts_dir/gomod-guard.sh"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+fail=0
+ok() { echo "ok: $1"; }
+bad() {
+  echo "FAIL: $1"
+  fail=1
+}
+expect_exit() { # expect_exit <desc> <want> <got>
+  if [[ "$2" == "$3" ]]; then ok "$1 (exit $3)"; else bad "$1 (want exit $2, got $3)"; fi
+}
+expect_contains() { # expect_contains <desc> <needle> <file>
+  if grep -qF -- "$2" "$3"; then
+    ok "$1"
+  else
+    bad "$1 (missing: $2)"
+    sed 's/^/    /' "$3" >&2
+  fi
+}
+expect_not_contains() { # expect_not_contains <desc> <needle> <file>
+  if grep -qF -- "$2" "$3"; then
+    bad "$1 (should not contain: $2)"
+    sed 's/^/    /' "$3" >&2
+  else
+    ok "$1"
+  fi
+}
+
+# run <dir> <log>: runs gomod-guard.sh in <dir> and echoes its exit code.
+run() {
+  local rc=0
+  (cd "$1" && bash "$guard") >"$2" 2>&1 || rc=$?
+  sed 's/^/    | /' "$2" >&2
+  echo "$rc"
+}
+
+on_main=0123456789ab
+tip=abcdefabcdef
+pr_head=fedcbafedcba
+
+# The fake gh answers `gh api repos/<org>/<repo>/compare/<sha>...main?per_page=1 --jq .status`
+# and 404s on anything else, as the API does for an unknown repo or commit.
+fake="$work/bin"
+mkdir -p "$fake"
+{
+  echo '#!/usr/bin/env bash'
+  echo '[[ "$1" == api ]] || exit 9'
+  echo 'case "$2" in'
+  echo "  repos/Brigade-ITSM/brigade-authz/compare/$on_main...main?per_page=1) echo ahead ;;"
+  echo "  repos/Brigade-ITSM/brigade-core/compare/$tip...main?per_page=1) echo identical ;;"
+  echo "  repos/Brigade-ITSM/brigade-audit/compare/$pr_head...main?per_page=1) echo diverged ;;"
+  echo '  *)'
+  echo "    echo '{\"message\":\"Not Found\",\"status\":\"404\"}'"
+  echo '    echo "gh: Not Found (HTTP 404)" >&2'
+  echo '    exit 1'
+  echo '    ;;'
+  echo 'esac'
+} >"$fake/gh"
+chmod +x "$fake/gh"
+export PATH="$fake:$PATH"
+
+# A clean go.mod: tagged owner packages, and third-party pseudo-versions,
+# which the guard leaves alone.
+mkdir -p "$work/clean"
+cat >"$work/clean/go.mod" <<'GOMOD'
+module github.com/Brigade-ITSM/brigade-fixture
+
+go 1.26.6
+
+require github.com/Bugs5382/go-apperr v1.1.0
+
+require (
+	github.com/Bugs5382/go-log v1.3.0
+	github.com/Bugs5382/go-otel/v2 v2.0.0-rc.1
+	github.com/Brigade-ITSM/brigade-release v0.1.0 // indirect
+	golang.org/x/exp v0.0.0-20260101000000-0123456789ab // indirect
+)
+GOMOD
+rc="$(run "$work/clean" "$work/clean.log")"
+expect_exit "tagged owner packages pass" 0 "$rc"
+expect_contains "a clean go.mod says so" "go.mod: no replace directives, owner packages at tagged releases" "$work/clean.log"
+
+# Every way an untagged owner package or a replace gets in.
+mkdir -p "$work/dirty"
+cat >"$work/dirty/go.mod" <<'GOMOD'
+module github.com/Brigade-ITSM/brigade-fixture
+
+go 1.26.6
+
+require github.com/Bugs5382/go-apperr v0.0.0-20260930120000-0123456789ab
+
+require (
+	github.com/Bugs5382/go-log v1.3.1-0.20260930120000-abcdefabcdef
+	github.com/Bugs5382/go-otel v1.4.0-rc.1.0.20260930120000-abcdefabcdef // indirect
+	github.com/Brigade-ITSM/brigade-release v0.0.0-20261001000000-fedcbafedcba
+	github.com/Bugs5382/go-redis v1.2.0
+	golang.org/x/exp v0.0.0-20260101000000-0123456789ab
+)
+
+replace github.com/Bugs5382/go-redis => ../go-redis
+
+replace (
+	github.com/Bugs5382/go-postgres v1.2.2 => github.com/someone/go-postgres v1.2.3
+)
+GOMOD
+rc="$(run "$work/dirty" "$work/dirty.log")"
+expect_exit "an untagged go.mod fails" 1 "$rc"
+expect_contains "a v0.0.0 pseudo-version fails" \
+  "::error file=go.mod,line=5::github.com/Bugs5382/go-apperr is at a pseudo-version (v0.0.0-20260930120000-0123456789ab)" "$work/dirty.log"
+expect_contains "a -0.<timestamp> pseudo-version fails" \
+  "::error file=go.mod,line=8::github.com/Bugs5382/go-log is at a pseudo-version (v1.3.1-0.20260930120000-abcdefabcdef)" "$work/dirty.log"
+expect_contains "a pre-release pseudo-version fails, indirect too" \
+  "::error file=go.mod,line=9::github.com/Bugs5382/go-otel is at a pseudo-version (v1.4.0-rc.1.0.20260930120000-abcdefabcdef)" "$work/dirty.log"
+expect_contains "a Brigade-ITSM pseudo-version fails" \
+  "::error file=go.mod,line=10::github.com/Brigade-ITSM/brigade-release is at a pseudo-version" "$work/dirty.log"
+expect_not_contains "a tagged owner package isn't flagged" "github.com/Bugs5382/go-redis is at" "$work/dirty.log"
+expect_not_contains "a third-party pseudo-version isn't flagged" "golang.org/x/exp" "$work/dirty.log"
+expect_contains "a one-line replace fails" \
+  "::error file=go.mod,line=15::replace directive: github.com/Bugs5382/go-redis => ../go-redis" "$work/dirty.log"
+expect_contains "a replace in a block fails" \
+  "::error file=go.mod,line=18::replace directive: github.com/Bugs5382/go-postgres v1.2.2 => github.com/someone/go-postgres v1.2.3" "$work/dirty.log"
+
+# Brigade-ITSM modules may sit at a pseudo-version of a commit on their repo's
+# main while in development; Bugs5382 modules never may.
+mkdir -p "$work/dev"
+cat >"$work/dev/go.mod" <<GOMOD
+module github.com/Brigade-ITSM/brigade-fixture
+
+go 1.26.6
+
+require (
+	github.com/Brigade-ITSM/brigade-authz v0.0.0-20261005120000-$on_main
+	github.com/Brigade-ITSM/brigade-core/v2 v2.0.0-20261005120000-$tip // indirect
+	github.com/Brigade-ITSM/brigade-release v0.1.0
+	github.com/Bugs5382/go-apperr v1.1.0
+)
+GOMOD
+rc="$(run "$work/dev" "$work/dev.log")"
+expect_exit "Brigade-ITSM pseudo-versions on main pass" 0 "$rc"
+expect_contains "a commit main has moved past is on main" \
+  "github.com/Brigade-ITSM/brigade-authz v0.0.0-20261005120000-$on_main: Brigade-ITSM/brigade-authz $on_main is on main (ahead)" "$work/dev.log"
+expect_contains "main's tip is on main, a /vN module too" \
+  "github.com/Brigade-ITSM/brigade-core/v2 v2.0.0-20261005120000-$tip: Brigade-ITSM/brigade-core $tip is on main (identical)" "$work/dev.log"
+expect_contains "the summary names commits on main" \
+  "go.mod: no replace directives, owner packages at tagged releases or Brigade-ITSM commits on main" "$work/dev.log"
+
+mkdir -p "$work/offmain"
+cat >"$work/offmain/go.mod" <<GOMOD
+module github.com/Brigade-ITSM/brigade-fixture
+
+go 1.26.6
+
+require (
+	github.com/Brigade-ITSM/brigade-audit v0.1.1-0.20261005120000-$pr_head
+	github.com/Brigade-ITSM/brigade-nosuch v0.0.0-20261005120000-$on_main
+	github.com/Brigade-ITSM/brigade-authz v0.0.0-20261005120000-$on_main
+	github.com/Bugs5382/go-log v0.0.0-20261005120000-$on_main
+	github.com/Bugs5382/go-apperr v1.1.0
+	github.com/Brigade-ITSM/brigade-shortsha v0.0.0-20261005120000-0123456
+	github.com/Brigade-ITSM/brigade-shorttime v0.0.0-20261005-$on_main
+	github.com/Bugs5382/go-upper v0.0.0-20261005120000-0123456789AB
+	github.com/Brigade-ITSM/brigade-branch main
+	golang.org/x/exp v0.0.0-20261005-junk
+)
+GOMOD
+rc="$(run "$work/offmain" "$work/offmain.log")"
+expect_exit "owner pseudo-versions off main fail" 1 "$rc"
+expect_contains "a Brigade-ITSM commit off main fails" \
+  "::error file=go.mod,line=6::github.com/Brigade-ITSM/brigade-audit is at a pseudo-version (v0.1.1-0.20261005120000-$pr_head) whose commit isn't reachable from Brigade-ITSM/brigade-audit main (compare status: diverged)." "$work/offmain.log"
+expect_contains "an unknown Brigade-ITSM repo or commit fails" \
+  "::error file=go.mod,line=7::github.com/Brigade-ITSM/brigade-nosuch is at a pseudo-version (v0.0.0-20261005120000-$on_main): Brigade-ITSM/brigade-nosuch has no commit $on_main (compare returned 404)." "$work/offmain.log"
+expect_not_contains "a Brigade-ITSM commit on main isn't flagged" "::error file=go.mod,line=8::" "$work/offmain.log"
+expect_contains "a Bugs5382 pseudo-version fails, on main or not" \
+  "::error file=go.mod,line=9::github.com/Bugs5382/go-log is at a pseudo-version (v0.0.0-20261005120000-$on_main). Require a tagged release" "$work/offmain.log"
+expect_not_contains "a Bugs5382 tag isn't flagged" "::error file=go.mod,line=10::" "$work/offmain.log"
+expect_contains "a pseudo-version with a short commit fails" \
+  "::error file=go.mod,line=11::github.com/Brigade-ITSM/brigade-shortsha is at a malformed version (v0.0.0-20261005120000-0123456)" "$work/offmain.log"
+expect_contains "a pseudo-version with a short timestamp fails" \
+  "::error file=go.mod,line=12::github.com/Brigade-ITSM/brigade-shorttime is at a malformed version (v0.0.0-20261005-$on_main)" "$work/offmain.log"
+expect_contains "a pseudo-version with an upper-case commit fails" \
+  "::error file=go.mod,line=13::github.com/Bugs5382/go-upper is at a malformed version (v0.0.0-20261005120000-0123456789AB)" "$work/offmain.log"
+expect_contains "a branch name fails" \
+  "::error file=go.mod,line=14::github.com/Brigade-ITSM/brigade-branch is at a malformed version (main)" "$work/offmain.log"
+expect_not_contains "a third-party version is left alone" "golang.org/x/exp" "$work/offmain.log"
+
+# A nested module is checked too; hidden directories (fetched protos, the
+# workflow's tools checkout) are not.
+mkdir -p "$work/nested/tools" "$work/nested/.proto-sync-tools"
+printf 'module github.com/Brigade-ITSM/brigade-fixture\n\ngo 1.26.6\n' >"$work/nested/go.mod"
+printf 'module github.com/Brigade-ITSM/brigade-fixture/tools\n\ngo 1.26.6\n\nreplace example.com/a => ../a\n' >"$work/nested/tools/go.mod"
+printf 'module example.com/hidden\n\ngo 1.26.6\n\nreplace example.com/b => ../b\n' >"$work/nested/.proto-sync-tools/go.mod"
+rc="$(run "$work/nested" "$work/nested.log")"
+expect_exit "a nested module with a replace fails" 1 "$rc"
+expect_contains "the nested go.mod is named" "::error file=tools/go.mod,line=5::replace directive: example.com/a => ../a" "$work/nested.log"
+expect_not_contains "hidden directories are skipped" "example.com/b" "$work/nested.log"
+
+mkdir -p "$work/none"
+rc="$(run "$work/none" "$work/none.log")"
+expect_exit "no go.mod passes" 0 "$rc"
+
+echo
+if [[ "$fail" == 0 ]]; then
+  echo "gomod-guard_test.sh: all checks passed"
+else
+  echo "gomod-guard_test.sh: FAILURES ABOVE"
+fi
+exit "$fail"
