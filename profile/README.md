@@ -8,7 +8,7 @@
 
 <p align="center"><strong>Your order, done right.</strong></p>
 
-# Brigade-ITSM 🛎️
+# Brigade-ITSM™ 🛎️
 
 > 🎫 IT service management, built as a set of small services.
 
@@ -36,3 +36,7 @@ Brigade is in early development.
 ## 📄 Licence
 
 Proprietary. Copyright (c) 2026 the rabbit hole tech, llc. All rights reserved.
+
+## ™️ Trademarks
+
+Brigade-ITSM™ and the Brigade-ITSM logo are trademarks of the rabbit hole tech, llc. Brigade-ITSM is proprietary software, not open source; see [LICENSE](https://github.com/Brigade-ITSM/.github/blob/main/LICENSE). See [TRADEMARKS.md](https://github.com/Brigade-ITSM/.github/blob/main/TRADEMARKS.md) for the usage policy. Applications to register these trademarks are being prepared; full registered (®) protection is pending until they are granted.
