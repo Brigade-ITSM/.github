@@ -26,7 +26,7 @@
 # golangci-lint and gosec are downloaded at pinned versions and checked
 # against the SHA-256 in each release's checksums file; govulncheck and
 # modernize come through go install, which checks each module against the Go
-# checksum database. setup-go caches the module and build caches, and the lint
+# checksum database. setup-go does not cache, and the lint
 # job caches golangci-lint's own. It takes no secrets.
 name: quality
 
@@ -77,6 +77,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Cache golangci-lint
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -137,6 +138,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Install gosec
         run: |
@@ -188,6 +190,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Install govulncheck
         run: |
@@ -233,6 +236,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Install modernize
         run: |
